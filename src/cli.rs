@@ -7,8 +7,6 @@ use cli_command_kit::{
 use std::{ffi::OsString, io::Write};
 use tokio_util::sync::CancellationToken;
 
-const SKILL: &str = "Install the youtube-captions-dl skill using the Skills CLI:\n\n  npx skills add alexgorbatchev/youtube-captions-dl --skill youtube-captions-dl\n\nSkill:\n\n  https://github.com/alexgorbatchev/youtube-captions-dl/tree/main/skills/youtube-captions-dl\n";
-
 pub struct Runtime {
     pub cache: Cache,
     pub client: Client,
@@ -47,7 +45,10 @@ pub fn command() -> Command {
 
 pub fn help_options() -> HelpOptions {
     HelpOptions {
-        skill: Some(SKILL.into()),
+        skill: Some(
+            cli_command_kit::SkillSource::new("alexgorbatchev/youtube-captions-dl", "main")
+                .expect("the fixed skill source names a GitHub repository"),
+        ),
         ..Default::default()
     }
 }
@@ -60,7 +61,7 @@ async fn perform(
     cancel: &CancellationToken,
     runtime: Option<&Runtime>,
 ) -> Result<()> {
-    if cli_command_kit::write_skill(matches, &help_options(), output)? {
+    if cli_command_kit::write_skill(&command(), matches, &help_options(), output)? {
         return Ok(());
     }
     if matches.get_flag("version") {
