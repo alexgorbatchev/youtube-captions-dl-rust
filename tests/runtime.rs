@@ -450,16 +450,13 @@ fn skill_covers_live_interface_and_its_exact_repository_destination() {
     );
 }
 
-/// A stand-in `yt-dlp` that records SIGTERM in `leader-term` and exits. With
-/// `stubborn`, it first starts a grandchild that records SIGTERM in
-/// `grandchild-term` and keeps running, so only SIGKILL can end it.
-///
-/// The runner stops reading the child's output pipes once cancellation starts,
-/// so the shells' job-status messages go to `/dev/null` instead of raising
-/// SIGPIPE before their traps run.
+/// A stand-in `yt-dlp` whose SIGTERM handler writes to stderr before recording
+/// `leader-term` and exiting, so the marker proves the output pipes stayed open
+/// through termination. With `stubborn`, it first starts a grandchild that does
+/// the same with `grandchild-term` and keeps running, so only SIGKILL can end it.
 fn terminating_stand_in(stubborn: bool) -> Fixture {
     let grandchild = if stubborn {
-        r#"sh -c 'trap "echo > \"$1/grandchild-term\"" TERM
+        r#"sh -c 'trap "echo grandchild stopping >&2; echo > \"$1/grandchild-term\"" TERM
 echo $$ > "$1/grandchild.tmp" && mv "$1/grandchild.tmp" "$1/grandchild.pid"
 while :; do sleep 0.05; done' sh "$dir" &
 while [ ! -f "$dir/grandchild.pid" ]; do sleep 0.01; done"#
@@ -469,9 +466,8 @@ while [ ! -f "$dir/grandchild.pid" ]; do sleep 0.01; done"#
     Fixture::new(&format!(
         r#"PATH=/usr/bin:/bin
 dir=$(dirname "$0")
-exec 2>/dev/null
 echo $$ > "$dir/leader.pid"
-trap 'echo > "$dir/leader-term"; exit 143' TERM
+trap 'echo stopping >&2; echo > "$dir/leader-term"; exit 143' TERM
 {grandchild}
 echo > "$dir/ready"
 while :; do sleep 0.05; done"#

@@ -239,7 +239,7 @@ dependencies = [
 [[package]]
 name = "cli-deps"
 version = "0.1.0"
-source = "git+https://github.com/alexgorbatchev/deps-rust.git?rev=13fe1c7e6acc72ac602530e5a0d27475a0732e7d#13fe1c7e6acc72ac602530e5a0d27475a0732e7d"
+source = "git+https://github.com/alexgorbatchev/deps-rust.git?rev=b814d706b03944b98189280fd8c306daf219a382#b814d706b03944b98189280fd8c306daf219a382"
 dependencies = [
  "async-trait",
  "dirs 6.0.0",
