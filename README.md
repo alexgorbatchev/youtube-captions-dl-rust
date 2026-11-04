@@ -17,9 +17,10 @@
 
 - Uncached retrieval invokes yt-dlp from `PATH` for metadata and makes an HTTP request for the first usable XML caption track. User yt-dlp configuration, plugins, media downloads, and its own filesystem cache are disabled.
 - Manual captions take precedence over automatic captions. Track order comes from the extractor; there is no language-selection option.
-- A 30-second deadline covers extraction and download together. YouTube access restrictions or challenge requirements can prevent a fetch.
+- A 30-second deadline covers extraction and download together; stopping yt-dlp after it expires can add up to 5 seconds. YouTube access restrictions or challenge requirements can prevent a fetch.
 - Cached cues live indefinitely in `$XDG_CACHE_HOME/youtube-captions-dl/<ID>.v9.json`, falling back to `~/.cache/youtube-captions-dl/`. Remove a video's file to refresh it. Cache files are atomically replaced and private on Unix.
 - Cache warnings go to stderr and retrieval continues when possible. Human stdout contains the title, a terminal-width divider, and captions wrapped to 80 display columns. `AGENT=1` stdout contains `video_id`, `title`, `language`, `generated`, and unwrapped `text` as one JSON object.
+- Ctrl-C (SIGINT) and SIGTERM cancel the run. A running yt-dlp and its process group receive SIGTERM, and SIGKILL only if they are still running 5 seconds later; the command exits after they stop. A deadline expiry stops yt-dlp the same way.
 - Exit 0 means success or help/version output, exit 1 means failure, and exit 130 means cancellation. An output failure can occur after a successful cache write.
 
 # Installation

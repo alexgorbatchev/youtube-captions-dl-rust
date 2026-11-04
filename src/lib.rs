@@ -9,7 +9,7 @@ pub use transcript::{CaptionTrack, format_cues, parse_transcript, parse_video_id
 use anyhow::{Context, Result, bail};
 use cli_deps::{CommandRunner, ProcessRunner};
 use serde::{Deserialize, Serialize};
-use std::time::Duration;
+use std::{ffi::OsStr, time::Duration};
 use tokio_util::sync::CancellationToken;
 
 #[derive(Debug, thiserror::Error)]
@@ -46,15 +46,34 @@ impl Client {
         })
     }
 
+    /// Retrieves captions within `deadline`.
+    ///
+    /// Caller cancellation and the deadline both stop `yt-dlp` through the
+    /// runner's graceful process-group termination, so this returns only after
+    /// the subprocess group has exited; a timeout can therefore take up to the
+    /// runner's `termination_grace` longer than `deadline`.
     pub async fn fetch(&self, video_id: &str, cancel: &CancellationToken) -> Result<Captions> {
         let video_id = parse_video_id(video_id)?;
-        tokio::select! {
-            biased;
-            _ = cancel.cancelled() => Err(FetchError::Cancelled.into()),
-            result = tokio::time::timeout(self.deadline, self.fetch_inner(&video_id, cancel)) => {
-                result.map_err(|_| FetchError::Timeout)?
+        let scope = cancel.child_token();
+        let work = self.fetch_inner(&video_id, &scope);
+        tokio::pin!(work);
+        let result = tokio::select! {
+            result = &mut work => result,
+            () = tokio::time::sleep(self.deadline) => {
+                scope.cancel();
+                let _ = work.await;
+                return Err(if cancel.is_cancelled() {
+                    FetchError::Cancelled
+                } else {
+                    FetchError::Timeout
+                }
+                .into());
             }
+        };
+        if result.is_err() && cancel.is_cancelled() {
+            return Err(FetchError::Cancelled.into());
         }
+        result
     }
 
     async fn fetch_inner(&self, video_id: &str, cancel: &CancellationToken) -> Result<Captions> {
@@ -73,7 +92,7 @@ impl Client {
         .map(str::to_owned);
         let bytes = self
             .runner
-            .run("yt-dlp", &arguments, cancel)
+            .run(OsStr::new("yt-dlp"), &arguments, cancel)
             .await
             .context("extracting caption metadata with yt-dlp")?;
         let metadata: serde_json::Value =
@@ -88,18 +107,11 @@ impl Client {
             .context("video title is missing")?
             .to_owned();
         let track = select_track(&metadata)?;
-        let body = self
-            .http
-            .get(track.url)
-            .headers(track.headers)
-            .send()
-            .await
-            .context("fetching captions")?
-            .error_for_status()
-            .context("caption server rejected request")?
-            .text()
-            .await
-            .context("reading captions")?;
+        let body = tokio::select! {
+            biased;
+            () = cancel.cancelled() => return Err(FetchError::Cancelled.into()),
+            body = self.download(track.url, track.headers) => body?,
+        };
         let cues = parse_transcript(&body)?;
         Ok(Captions {
             video_id: video_id.into(),
@@ -108,5 +120,19 @@ impl Client {
             generated: track.generated,
             cues,
         })
+    }
+
+    async fn download(&self, url: url::Url, headers: reqwest::header::HeaderMap) -> Result<String> {
+        self.http
+            .get(url)
+            .headers(headers)
+            .send()
+            .await
+            .context("fetching captions")?
+            .error_for_status()
+            .context("caption server rejected request")?
+            .text()
+            .await
+            .context("reading captions")
     }
 }

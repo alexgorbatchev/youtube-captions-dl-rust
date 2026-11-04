@@ -17,7 +17,7 @@ Independent Rust CLI for title/caption retrieval. Parent [AGENTS.md](../AGENTS.m
 ## Contracts
 
 - Integrate native yt-dlp metadata and subtitle request headers; use the shared `cli-deps::ProcessRunner`, without manual process emulation or private InnerTube request copies.
-- Preserve the single 30-second workflow deadline and typed cancellation. Cache hits must avoid HTTP and subprocess execution.
+- Preserve the single 30-second workflow deadline and typed cancellation. Stop yt-dlp through the runner's cancellation token for both caller cancellation and the deadline, never by dropping its future, so the runner's SIGTERM-then-SIGKILL termination completes before the command exits. `main` translates SIGINT and SIGTERM into token cancellation because yt-dlp runs in its own session. Cache hits must avoid HTTP and subprocess execution.
 - Keep manual-track priority, extractor JSON order, and `srv1` XML validation. Quick XML's deserializer alone does not enforce the expected root or a single document; retain explicit native Reader validation.
 - Retain atomic same-directory cache replacement and private Unix file permissions. Cache payloads hold cues rather than human presentation, so formatting is applied independently in both modes.
 - Only the CLI error boundary reports returned errors. Route diagnostic paths through `cli_command_kit::display_message`; filesystem calls keep native paths.

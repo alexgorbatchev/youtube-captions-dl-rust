@@ -6,7 +6,8 @@ use std::{
     fs,
     io::{self, Write},
     os::unix::fs::PermissionsExt,
-    time::Duration,
+    path::{Path, PathBuf},
+    time::{Duration, Instant},
 };
 use tokio_util::sync::CancellationToken;
 use youtube_captions_dl::{Cache, Captions, Client, FetchError, Runtime};
@@ -18,7 +19,9 @@ struct Fixture {
 
 impl Fixture {
     fn new(script: &str) -> Self {
-        let dir = tempfile::tempdir_in(concat!(env!("CARGO_MANIFEST_DIR"), "/.tmp")).unwrap();
+        let scratch = concat!(env!("CARGO_MANIFEST_DIR"), "/.tmp");
+        fs::create_dir_all(scratch).unwrap();
+        let dir = tempfile::tempdir_in(scratch).unwrap();
         let executable = dir.path().join("yt-dlp");
         fs::write(&executable, format!("#!/bin/sh\n{script}\n")).unwrap();
         fs::set_permissions(&executable, fs::Permissions::from_mode(0o700)).unwrap();
@@ -445,4 +448,185 @@ fn skill_covers_live_interface_and_its_exact_repository_destination() {
             .lines()
             .any(|line| line == "name: youtube-captions-dl")
     );
+}
+
+/// A stand-in `yt-dlp` that records SIGTERM in `leader-term` and exits. With
+/// `stubborn`, it first starts a grandchild that records SIGTERM in
+/// `grandchild-term` and keeps running, so only SIGKILL can end it.
+///
+/// The runner stops reading the child's output pipes once cancellation starts,
+/// so the shells' job-status messages go to `/dev/null` instead of raising
+/// SIGPIPE before their traps run.
+fn terminating_stand_in(stubborn: bool) -> Fixture {
+    let grandchild = if stubborn {
+        r#"sh -c 'trap "echo > \"$1/grandchild-term\"" TERM
+echo $$ > "$1/grandchild.tmp" && mv "$1/grandchild.tmp" "$1/grandchild.pid"
+while :; do sleep 0.05; done' sh "$dir" &
+while [ ! -f "$dir/grandchild.pid" ]; do sleep 0.01; done"#
+    } else {
+        ""
+    };
+    Fixture::new(&format!(
+        r#"PATH=/usr/bin:/bin
+dir=$(dirname "$0")
+exec 2>/dev/null
+echo $$ > "$dir/leader.pid"
+trap 'echo > "$dir/leader-term"; exit 143' TERM
+{grandchild}
+echo > "$dir/ready"
+while :; do sleep 0.05; done"#
+    ))
+}
+
+/// Kills whatever remains of the stand-in's process group when a test ends,
+/// including on failure.
+struct GroupGuard(PathBuf);
+
+impl GroupGuard {
+    fn leader(&self) -> Option<rustix::process::Pid> {
+        fs::read_to_string(self.0.join("leader.pid"))
+            .ok()
+            .and_then(|pid| pid.trim().parse().ok())
+            .and_then(rustix::process::Pid::from_raw)
+    }
+
+    /// Waits until no member of the group remains, including unreaped ones.
+    fn wait_for_exit(&self) -> bool {
+        let leader = self.leader().expect("the stand-in recorded its pid");
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while rustix::process::test_kill_process_group(leader).is_ok() {
+            if Instant::now() >= deadline {
+                return false;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        true
+    }
+}
+
+impl Drop for GroupGuard {
+    fn drop(&mut self) {
+        if let Some(leader) = self.leader() {
+            let _ = rustix::process::kill_process_group(leader, rustix::process::Signal::KILL);
+        }
+    }
+}
+
+async fn wait_for_file(path: &Path) {
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while !path.exists() {
+        assert!(
+            Instant::now() < deadline,
+            "{} never appeared",
+            path.display()
+        );
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+}
+
+#[tokio::test]
+async fn cancellation_and_deadline_terminate_yt_dlp_before_killing_its_group() {
+    let grace = Duration::from_millis(300);
+    for timeout in [false, true] {
+        let mut fixture = terminating_stand_in(true);
+        let dir = fixture.dir.path().to_owned();
+        let group = GroupGuard(dir.clone());
+        fixture.runtime.client.runner.termination_grace = grace;
+        fixture.runtime.client.deadline = Duration::from_secs(if timeout { 2 } else { 30 });
+        let token = CancellationToken::new();
+        let started = Instant::now();
+        let trigger = async {
+            wait_for_file(&dir.join("ready")).await;
+            if !timeout {
+                token.cancel();
+            }
+            Instant::now()
+        };
+        let (result, ready) =
+            tokio::join!(fixture.runtime.client.fetch("tG1CSRaJhKQ", &token), trigger);
+        let returned = Instant::now();
+        let error = result.unwrap_err();
+        assert!(
+            matches!(
+                (timeout, error.downcast_ref::<FetchError>()),
+                (false, Some(FetchError::Cancelled)) | (true, Some(FetchError::Timeout))
+            ),
+            "{error:#}"
+        );
+        assert!(dir.join("leader-term").exists(), "yt-dlp received SIGTERM");
+        assert!(
+            dir.join("grandchild-term").exists(),
+            "the rest of the group received SIGTERM"
+        );
+        let signalled = if timeout {
+            started + fixture.runtime.client.deadline
+        } else {
+            ready
+        };
+        assert!(
+            returned - signalled >= grace,
+            "the group kept its grace period before SIGKILL"
+        );
+        assert!(group.wait_for_exit(), "SIGKILL ended the group");
+    }
+}
+
+#[test]
+fn interrupt_and_termination_signals_cancel_the_cli_and_stop_yt_dlp() {
+    for signal in [rustix::process::Signal::INT, rustix::process::Signal::TERM] {
+        let fixture = terminating_stand_in(false);
+        let dir = fixture.dir.path().to_owned();
+        let group = GroupGuard(dir.clone());
+        let child = std::process::Command::new(env!("CARGO_BIN_EXE_youtube-captions-dl"))
+            .args(["caption", "get", "tG1CSRaJhKQ"])
+            .env("AGENT", "1")
+            .env("XDG_CACHE_HOME", dir.join("xdg"))
+            .env("PATH", &dir)
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .unwrap();
+        let cli = CliGuard(Some(child));
+        tokio::runtime::Builder::new_current_thread()
+            .enable_time()
+            .build()
+            .unwrap()
+            .block_on(wait_for_file(&dir.join("ready")));
+        let pid = rustix::process::Pid::from_child(cli.0.as_ref().unwrap());
+        rustix::process::kill_process(pid, signal).unwrap();
+        let output = cli.wait();
+        assert_eq!(output.status.code(), Some(130), "{signal:?}");
+        assert!(output.stdout.is_empty());
+        assert_eq!(output.stderr, b"ERR: operation cancelled\n");
+        assert!(dir.join("leader-term").exists(), "yt-dlp received SIGTERM");
+        assert!(group.wait_for_exit());
+        assert!(!dir.join("xdg").exists(), "a cancelled run writes no cache");
+    }
+}
+
+/// Kills the CLI if a test fails before it exits.
+struct CliGuard(Option<std::process::Child>);
+
+impl CliGuard {
+    fn wait(mut self) -> std::process::Output {
+        let mut child = self.0.take().unwrap();
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while child.try_wait().unwrap().is_none() {
+            if Instant::now() >= deadline {
+                self.0 = Some(child);
+                panic!("the CLI did not exit after the signal");
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        child.wait_with_output().unwrap()
+    }
+}
+
+impl Drop for CliGuard {
+    fn drop(&mut self) {
+        if let Some(mut child) = self.0.take() {
+            let _ = child.kill();
+            let _ = child.wait();
+        }
+    }
 }
