@@ -4,7 +4,7 @@ description: Retrieve a YouTube video's title and plain-text captions with youtu
 author: alexgorbatchev
 metadata:
   created_on: 2026-10-14 16:47
-  last_modified: 2026-11-06 03:20
+  last_modified: 2026-11-06 03:36
   status: current
 ---
 
@@ -38,7 +38,7 @@ The generated `help` command also accepts the generated nested `help` path. Shel
 
 The first usable manual caption track is selected in the extractor's language/format order; automatic captions are the fallback. Supported tracks have `ext: srv1` and HTTP/HTTPS URLs. Track request headers take precedence over video request headers. A missing title, mismatched video ID, unavailable XML track, malformed XML, or empty transcript produces an error.
 
-An uncached run executes `yt-dlp` from `PATH` to extract metadata for `https://www.youtube.com/watch?v=<ID>`. It disables user configuration, plugins, yt-dlp's cache, and playlist processing; simulation prevents media downloads. A 30-second deadline covers extraction and caption download together. SIGINT (Ctrl-C) and SIGTERM cancel the run; yt-dlp runs in its own process group, which receives SIGTERM and then SIGKILL if still running 5 seconds later, and the command exits only after that group stops. A deadline expiry stops yt-dlp the same way, so a timed-out run can take up to 35 seconds. YouTube's access restrictions and yt-dlp's external runtime requirements still apply.
+An uncached run executes `yt-dlp` from `PATH` to extract metadata for `https://www.youtube.com/watch?v=<ID>`. It disables user configuration, plugins, yt-dlp's cache, and playlist processing; simulation prevents media downloads. A 30-second deadline covers extraction and caption download together. SIGINT (Ctrl-C) and SIGTERM cancel the run; yt-dlp runs in its own process group, which receives SIGTERM and then SIGKILL if still running 5 seconds later, and the command exits only after that group stops. A deadline expiry stops yt-dlp the same way. The 30-second deadline starts shutdown; it does not bound completion. After the 5-second grace period, the command still waits for the operating system to finish terminating and reaping every group member. YouTube's access restrictions and yt-dlp's external runtime requirements still apply.
 
 Cached objects are stored indefinitely at `$XDG_CACHE_HOME/youtube-captions-dl/<ID>.v9.json`, or `~/.cache/youtube-captions-dl/<ID>.v9.json` when XDG is empty/unset. A nonempty XDG path must be absolute. Cache hits skip yt-dlp and HTTP. New entries are staged in the same directory, synced, and atomically replaced; Unix files have mode 0600. Cache read/write failures produce stderr warnings and retrieval continues when possible. Remove a video's cache file to fetch again. The Go `.v8.txt` cache is a different format.
 

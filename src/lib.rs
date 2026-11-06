@@ -50,8 +50,10 @@ impl Client {
     ///
     /// Caller cancellation and the deadline both stop `yt-dlp` through the
     /// runner's graceful process-group termination, so this returns only after
-    /// the subprocess group has exited; a timeout can therefore take up to the
-    /// runner's `termination_grace` longer than `deadline`.
+    /// the subprocess group has exited. The deadline initiates shutdown rather
+    /// than bounding its duration: after `termination_grace`, SIGKILL escalation
+    /// still waits for the operating system to finish terminating and reaping
+    /// every group member.
     pub async fn fetch(&self, video_id: &str, cancel: &CancellationToken) -> Result<Captions> {
         let video_id = parse_video_id(video_id)?;
         let scope = cancel.child_token();

@@ -499,7 +499,11 @@ async fn cancellation_and_deadline_terminate_yt_dlp_before_killing_its_group() {
             returned - signalled >= grace,
             "the group kept its grace period before SIGKILL"
         );
-        group.wait_for_exit().expect("SIGKILL ended the group");
+        assert_eq!(
+            rustix::process::test_kill_process_group(group.leader().unwrap().unwrap()),
+            Err(rustix::io::Errno::SRCH),
+            "the group must be gone when cancellation or the deadline returns"
+        );
     }
 }
 
@@ -531,7 +535,11 @@ fn interrupt_and_termination_signals_cancel_the_cli_and_stop_yt_dlp() {
         assert!(output.stdout.is_empty());
         assert_eq!(output.stderr, b"ERR: operation cancelled\n");
         assert!(dir.join("leader-term").exists(), "yt-dlp received SIGTERM");
-        group.wait_for_exit().unwrap();
+        assert_eq!(
+            rustix::process::test_kill_process_group(group.leader().unwrap().unwrap()),
+            Err(rustix::io::Errno::SRCH),
+            "the CLI must wait for its yt-dlp group before exiting"
+        );
         assert!(!dir.join("xdg").exists(), "a cancelled run writes no cache");
     }
 }
