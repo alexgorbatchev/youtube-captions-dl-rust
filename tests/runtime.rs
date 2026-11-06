@@ -274,6 +274,10 @@ async fn metadata_and_validation_are_offline_and_handle_output_failures() {
             assert_eq!(status, 0, "{errors}");
             assert!(errors.is_empty());
             assert_eq!(output.starts_with("ALERT: Agents must read `AGENT=1 youtube-captions-dl skill` before using this tool.\n"), mode == Mode::Agent);
+            if args.contains(&"get") {
+                let words = output.split_whitespace().collect::<Vec<_>>().join(" ");
+                assert!(words.contains("YouTube URL or 11-character video ID"));
+            }
         }
         for args in [
             vec!["youtube-captions-dl", "caption", "get", "invalid"],

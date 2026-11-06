@@ -34,7 +34,7 @@ pub fn command() -> Command {
                         .arg(
                             Arg::new("VIDEO")
                                 .required(true)
-                                .help("YouTube URL or11-character video ID")
+                                .help("YouTube URL or 11-character video ID")
                                 .value_parser(|value: &str| {
                                     parse_video_id(value).map_err(|error| error.to_string())
                                 }),

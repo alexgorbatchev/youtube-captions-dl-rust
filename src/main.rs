@@ -47,11 +47,29 @@ impl Signals {
 #[tokio::main]
 async fn main() {
     let mode = cli_command_kit::Mode::from_env();
-    let signals = match Signals::register() {
+    let status = run(
+        Signals::register(),
+        std::env::args_os(),
+        &mut io::stdout().lock(),
+        &mut io::stderr().lock(),
+        mode,
+    )
+    .await;
+    std::process::exit(i32::from(status));
+}
+
+async fn run(
+    signals: io::Result<Signals>,
+    args: impl IntoIterator<Item = std::ffi::OsString>,
+    output: &mut impl Write,
+    diagnostics: &mut impl Write,
+    mode: cli_command_kit::Mode,
+) -> u8 {
+    let signals = match signals {
         Ok(signals) => signals,
         Err(error) => {
             let _ = writeln!(
-                io::stderr(),
+                diagnostics,
                 "{} registering signal handlers: {}",
                 if mode == cli_command_kit::Mode::Agent {
                     "ERR:"
@@ -60,20 +78,16 @@ async fn main() {
                 },
                 cli_command_kit::display_message(&error.to_string())
             );
-            std::process::exit(1);
+            return 1;
         }
     };
     let cancel = CancellationToken::new();
     let handler = tokio::spawn(signals.cancel_on_signal(cancel.clone()));
-    let status = youtube_captions_dl::entry(
-        std::env::args_os(),
-        &mut io::stdout().lock(),
-        &mut io::stderr().lock(),
-        mode,
-        &cancel,
-        None,
-    )
-    .await;
+    let status = youtube_captions_dl::entry(args, output, diagnostics, mode, &cancel, None).await;
     handler.abort();
-    std::process::exit(i32::from(status));
+    status
 }
+
+#[cfg(all(test, unix))]
+#[path = "../tests/startup/mod.rs"]
+mod tests;

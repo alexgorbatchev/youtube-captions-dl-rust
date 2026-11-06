@@ -4,7 +4,7 @@ description: Retrieve a YouTube video's title and plain-text captions with youtu
 author: alexgorbatchev
 metadata:
   created_on: 2026-10-14 16:47
-  last_modified: 2026-11-04 12:14
+  last_modified: 2026-11-06 03:20
   status: current
 ---
 
@@ -54,7 +54,7 @@ XML entities and encoded HTML markup are decoded into plain text. Ordinary cues 
 | `COLUMNS` | Shared terminal-width override for human help and dividers. |
 | `HTTP_PROXY`, `HTTPS_PROXY`, `ALL_PROXY`, `NO_PROXY` | Standard proxy settings used by the HTTP client and yt-dlp according to each tool's policy. |
 
-Exit 0 means success or displayed metadata/help. Exit 1 means argument, cache-location, dependency, extraction, HTTP, parsing, or output failure. Exit 130 means cancellation. Errors are printed once on stderr (`ERR:` in agent mode, `[ERROR]` in human mode); cache warnings use `WARN:` or `[WARN]`. Runtime failures omit usage. A failed output write can occur after a cache entry has been published. Home paths in diagnostics are displayed with `~`.
+Exit 0 means success or displayed metadata/help. Exit 1 means signal-registration, argument, cache-location, dependency, extraction, HTTP, parsing, or output failure. Signal-registration failure stops the command before argument processing or retrieval. Exit 130 means cancellation. Errors are printed once on stderr (`ERR:` in agent mode, `[ERROR]` in human mode); cache warnings use `WARN:` or `[WARN]`. Runtime failures omit usage. A failed output write can occur after a cache entry has been published. Home paths in diagnostics are displayed with `~`.
 
 ## Examples
 
