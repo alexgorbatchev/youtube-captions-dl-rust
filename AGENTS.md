@@ -12,6 +12,7 @@ Independent Rust CLI for title/caption retrieval. Parent [AGENTS.md](../AGENTS.m
 
 - `just run caption get <VIDEO>` and `just run-ai caption get <VIDEO>`.
 - `just test`, `just lint`, `just coverage`, and `just check`.
+- CI runs `just check` and `cargo test --doc --locked` on GitHub-hosted Linux and macOS for pull requests and pushes to `main`; fork pull requests use the same hosted jobs.
 - `just build` produces `bin/youtube-captions-dl`; Cargo's intermediate files stay in `target/`.
 
 ## Contracts
