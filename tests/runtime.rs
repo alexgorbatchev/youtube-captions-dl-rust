@@ -2,6 +2,9 @@
 
 mod support;
 
+#[path = "runtime/cleanup.rs"]
+mod cleanup;
+
 use cli_command_kit::Mode;
 use std::{
     ffi::OsString,
@@ -13,25 +16,28 @@ use std::{
 };
 use support::{CliGuard, Fixture, ProcessGroup};
 use tokio_util::sync::CancellationToken;
-use youtube_captions_dl::{Cache, Captions, FetchError, Runtime};
+use youtube_captions_dl::{Cache, Captions, FetchError};
 
 async fn run(
     args: &[&str],
     mode: Mode,
     token: &CancellationToken,
-    runtime: Option<&Runtime>,
+    fixture: Option<&Fixture>,
 ) -> (u8, String, String) {
     let mut output = Vec::new();
     let mut errors = Vec::new();
-    let status = youtube_captions_dl::entry(
+    let work = youtube_captions_dl::entry(
         args.iter().map(OsString::from),
         &mut output,
         &mut errors,
         mode,
         token,
-        runtime,
-    )
-    .await;
+        fixture.map(|fixture| &fixture.runtime),
+    );
+    let status = match fixture {
+        Some(fixture) => fixture.track(work).await,
+        None => work.await,
+    };
     (
         status,
         String::from_utf8(output).unwrap(),
@@ -76,7 +82,7 @@ async fn native_process_and_http_feed_cache_and_dual_mode_output() {
             "get",
             "https://youtu.be/tG1CSRaJhKQ",
         ];
-        let (status, output, errors) = run(&args, mode, &token, Some(&fixture.runtime)).await;
+        let (status, output, errors) = run(&args, mode, &token, Some(&fixture)).await;
         thread.join().unwrap();
         assert_eq!(status, 0, "{errors}");
         assert!(errors.is_empty());
@@ -95,7 +101,7 @@ async fn native_process_and_http_feed_cache_and_dual_mode_output() {
         }
         fs::remove_file(fixture.dir.path().join("yt-dlp")).unwrap();
         assert_eq!(
-            run(&args, mode, &token, Some(&fixture.runtime)).await,
+            run(&args, mode, &token, Some(&fixture)).await,
             (0, output, String::new())
         );
     }
@@ -131,8 +137,6 @@ async fn subtitle_requests_preserve_native_extractor_header_policy() {
             agent
         });
         fixture
-            .runtime
-            .client
             .fetch("tG1CSRaJhKQ", &CancellationToken::new())
             .await
             .unwrap();
@@ -162,7 +166,7 @@ async fn cache_failures_are_nonfatal_warnings_and_do_not_replace_blockers() {
             &["youtube-captions-dl", "caption", "get", "tG1CSRaJhKQ"],
             mode,
             &CancellationToken::new(),
-            Some(&fixture.runtime),
+            Some(&fixture),
         )
         .await;
         thread.join().unwrap();
@@ -188,7 +192,7 @@ async fn extraction_failures_are_typed_and_http_failures_are_reported_once() {
             &["youtube-captions-dl", "caption", "get", "tG1CSRaJhKQ"],
             Mode::Agent,
             &CancellationToken::new(),
-            Some(&fixture.runtime),
+            Some(&fixture),
         )
         .await;
         assert_eq!(status, 1);
@@ -201,8 +205,6 @@ async fn extraction_failures_are_typed_and_http_failures_are_reported_once() {
         let (url, thread) = server(status, body);
         let fixture = Fixture::metadata(metadata(&url));
         let result = fixture
-            .runtime
-            .client
             .fetch("tG1CSRaJhKQ", &CancellationToken::new())
             .await;
         thread.join().unwrap();
@@ -212,8 +214,6 @@ async fn extraction_failures_are_typed_and_http_failures_are_reported_once() {
     let mut fixture = Fixture::new("exec /bin/sleep 5");
     fixture.runtime.client.deadline = Duration::from_millis(30);
     let error = fixture
-        .runtime
-        .client
         .fetch("tG1CSRaJhKQ", &CancellationToken::new())
         .await
         .unwrap_err();
@@ -228,12 +228,7 @@ async fn extraction_failures_are_typed_and_http_failures_are_reported_once() {
         tokio::time::sleep(Duration::from_millis(30)).await;
         trigger.cancel();
     });
-    let error = fixture
-        .runtime
-        .client
-        .fetch("tG1CSRaJhKQ", &token)
-        .await
-        .unwrap_err();
+    let error = fixture.fetch("tG1CSRaJhKQ", &token).await.unwrap_err();
     assert!(matches!(
         error.downcast_ref::<FetchError>(),
         Some(FetchError::Cancelled)
@@ -242,7 +237,7 @@ async fn extraction_failures_are_typed_and_http_failures_are_reported_once() {
         &["youtube-captions-dl", "caption", "get", "tG1CSRaJhKQ"],
         Mode::Agent,
         &token,
-        Some(&fixture.runtime),
+        Some(&fixture),
     )
     .await;
     assert_eq!(status, 130);
@@ -311,15 +306,16 @@ async fn metadata_and_validation_are_offline_and_handle_output_failures() {
         ] {
             let mut errors = Vec::new();
             assert_eq!(
-                youtube_captions_dl::entry(
-                    args.iter().map(OsString::from),
-                    &mut Broken,
-                    &mut errors,
-                    mode,
-                    &token,
-                    Some(&fixture.runtime)
-                )
-                .await,
+                fixture
+                    .track(youtube_captions_dl::entry(
+                        args.iter().map(OsString::from),
+                        &mut Broken,
+                        &mut errors,
+                        mode,
+                        &token,
+                        Some(&fixture.runtime)
+                    ))
+                    .await,
                 1
             );
             assert_eq!(String::from_utf8(errors).unwrap().lines().count(), 1);
@@ -475,8 +471,7 @@ async fn cancellation_and_deadline_terminate_yt_dlp_before_killing_its_group() {
             }
             Instant::now()
         };
-        let (result, ready) =
-            tokio::join!(fixture.runtime.client.fetch("tG1CSRaJhKQ", &token), trigger);
+        let (result, ready) = tokio::join!(fixture.fetch("tG1CSRaJhKQ", &token), trigger);
         let returned = Instant::now();
         let error = result.unwrap_err();
         assert!(
@@ -534,90 +529,5 @@ fn interrupt_and_termination_signals_cancel_the_cli_and_stop_yt_dlp() {
         assert!(dir.join("leader-term").exists(), "yt-dlp received SIGTERM");
         assert!(group.wait_for_exit());
         assert!(!dir.join("xdg").exists(), "a cancelled run writes no cache");
-    }
-}
-
-#[test]
-fn fixture_shutdown_stops_the_group_before_removing_scratch() {
-    for stubborn in [false, true] {
-        let fixture = terminating_stand_in(stubborn);
-        let dir = fixture.dir.path().to_owned();
-        let child = std::process::Command::new(dir.join("yt-dlp"))
-            .process_group(0)
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .spawn()
-            .unwrap();
-        let cli = CliGuard(Some(child));
-        tokio::runtime::Builder::new_current_thread()
-            .enable_time()
-            .build()
-            .unwrap()
-            .block_on(wait_for_file(&dir.join("ready")));
-        let leader = ProcessGroup(dir.clone()).leader().unwrap().unwrap();
-        let reaper = std::thread::spawn(move || cli.wait());
-        let started = Instant::now();
-        drop(fixture);
-        let output = reaper.join().unwrap();
-        assert_eq!(output.status.code(), Some(143), "the leader handled TERM");
-        if stubborn {
-            assert!(started.elapsed() >= Duration::from_millis(300));
-        }
-        assert_eq!(
-            rustix::process::test_kill_process_group(leader),
-            Err(rustix::io::Errno::SRCH),
-            "every process exited before scratch removal"
-        );
-        assert!(!dir.exists());
-    }
-}
-
-#[test]
-fn failed_test_stops_the_cli_before_removing_its_scratch() {
-    let fixture = terminating_stand_in(false);
-    let dir = fixture.dir.path().to_owned();
-    let group = ProcessGroup(dir.clone());
-    let child = std::process::Command::new(env!("CARGO_BIN_EXE_youtube-captions-dl"))
-        .args(["caption", "get", "tG1CSRaJhKQ"])
-        .env("AGENT", "1")
-        .env("XDG_CACHE_HOME", dir.join("xdg"))
-        .env("PATH", &dir)
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .spawn()
-        .unwrap();
-    let cli = CliGuard(Some(child));
-    tokio::runtime::Builder::new_current_thread()
-        .enable_time()
-        .build()
-        .unwrap()
-        .block_on(wait_for_file(&dir.join("ready")));
-    let failed = std::panic::catch_unwind(move || {
-        let _cli = cli;
-        panic!("simulate a failed assertion while the CLI is running");
-    });
-    assert!(failed.is_err());
-    assert!(
-        dir.join("leader-term").exists(),
-        "shutdown allowed fixture cleanup"
-    );
-    assert!(
-        group.wait_for_exit(),
-        "shutdown confirmed every process exited"
-    );
-    drop(fixture);
-    assert!(!dir.exists(), "scratch was removed after shutdown");
-}
-
-#[test]
-fn uncertain_process_ownership_preserves_fixture_scratch() {
-    for invalid in ["not a process ID", "0", "-1"] {
-        let fixture = Fixture::new("exit 0");
-        let dir = fixture.dir.path().to_owned();
-        fs::write(dir.join("leader.pid"), invalid).unwrap();
-        let failed = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| drop(fixture)));
-        assert!(failed.is_err());
-        assert!(dir.join("yt-dlp").exists());
-        fs::remove_dir_all(dir).unwrap();
     }
 }

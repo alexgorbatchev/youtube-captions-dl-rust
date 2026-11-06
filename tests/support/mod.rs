@@ -1,14 +1,19 @@
 use std::{
-    fs, io,
+    cell::Cell,
+    fs,
+    future::Future,
+    io,
     os::unix::fs::PermissionsExt,
     path::PathBuf,
     time::{Duration, Instant},
 };
-use youtube_captions_dl::{Cache, Client, Runtime};
+use tokio_util::sync::CancellationToken;
+use youtube_captions_dl::{Cache, Captions, Client, Runtime};
 
 pub(super) struct Fixture {
     pub(super) dir: tempfile::TempDir,
     pub(super) runtime: Runtime,
+    unfinished: Cell<usize>,
 }
 
 impl Fixture {
@@ -27,12 +32,29 @@ impl Fixture {
                 client,
             },
             dir,
+            unfinished: Cell::new(0),
         }
     }
 
     pub(super) fn metadata(metadata: serde_json::Value) -> Self {
         let json = metadata.to_string().replace('\'', "'\\''");
         Self::new(&format!("printf '%s\\n' '{json}'"))
+    }
+
+    /// Returning from the client awaits process cleanup; dropping its future does not.
+    pub(super) async fn track<T>(&self, work: impl Future<Output = T>) -> T {
+        self.unfinished.set(self.unfinished.get() + 1);
+        let result = work.await;
+        self.unfinished.set(self.unfinished.get() - 1);
+        result
+    }
+
+    pub(super) async fn fetch(
+        &self,
+        video: &str,
+        token: &CancellationToken,
+    ) -> anyhow::Result<Captions> {
+        self.track(self.runtime.client.fetch(video, token)).await
     }
 }
 
@@ -76,10 +98,10 @@ impl ProcessGroup {
         }
     }
 
-    fn stop(&self) -> bool {
+    fn stop(&self, unfinished: usize) -> bool {
         let leader = match self.leader() {
             Ok(Some(leader)) => leader,
-            Ok(None) => return true,
+            Ok(None) => return unfinished == 0,
             Err(_) => return false,
         };
         for (signal, grace) in [
@@ -101,7 +123,8 @@ impl ProcessGroup {
 
 impl Drop for Fixture {
     fn drop(&mut self) {
-        if !ProcessGroup(self.dir.path().to_owned()).stop() {
+        let stopped = ProcessGroup(self.dir.path().to_owned()).stop(self.unfinished.get());
+        if !stopped || self.unfinished.get() != 0 {
             self.dir.disable_cleanup(true);
             let message = format!(
                 "cannot confirm fixture shutdown; preserving {}",

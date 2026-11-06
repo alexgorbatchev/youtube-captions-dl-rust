@@ -13,7 +13,7 @@ test:
     cargo test --locked --all-targets
 
 lint:
-    rustfmt --check --edition 2024 --config skip_children=true src/lib.rs src/main.rs src/cache.rs src/cli.rs src/transcript.rs tests/cache.rs tests/captions.rs tests/runtime.rs tests/support/mod.rs
+    rustfmt --check --edition 2024 --config skip_children=true src/lib.rs src/main.rs src/cache.rs src/cli.rs src/transcript.rs tests/cache.rs tests/captions.rs tests/runtime.rs tests/runtime/cleanup.rs tests/support/mod.rs
     cargo clippy --locked --all-targets -- -D warnings
 
 coverage:
