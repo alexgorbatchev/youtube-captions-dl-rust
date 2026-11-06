@@ -3,7 +3,7 @@ use youtube_captions_dl::{Cache, Captions, cache_directory};
 
 #[test]
 fn cache_round_trip_is_atomic_private_and_validated() {
-    let directory = tempfile::tempdir_in(concat!(env!("CARGO_MANIFEST_DIR"), "/.tmp")).unwrap();
+    let directory = tempfile::tempdir().unwrap();
     let cache = Cache {
         directory: directory.path().join("captions"),
     };

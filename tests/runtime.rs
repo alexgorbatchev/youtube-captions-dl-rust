@@ -1,48 +1,19 @@
 #![cfg(unix)]
 
+mod support;
+
 use cli_command_kit::Mode;
 use std::{
     ffi::OsString,
     fs,
     io::{self, Write},
-    os::unix::fs::PermissionsExt,
-    path::{Path, PathBuf},
+    os::unix::process::CommandExt,
+    path::Path,
     time::{Duration, Instant},
 };
+use support::{CliGuard, Fixture, ProcessGroup};
 use tokio_util::sync::CancellationToken;
-use youtube_captions_dl::{Cache, Captions, Client, FetchError, Runtime};
-
-struct Fixture {
-    dir: tempfile::TempDir,
-    runtime: Runtime,
-}
-
-impl Fixture {
-    fn new(script: &str) -> Self {
-        let scratch = concat!(env!("CARGO_MANIFEST_DIR"), "/.tmp");
-        fs::create_dir_all(scratch).unwrap();
-        let dir = tempfile::tempdir_in(scratch).unwrap();
-        let executable = dir.path().join("yt-dlp");
-        fs::write(&executable, format!("#!/bin/sh\n{script}\n")).unwrap();
-        fs::set_permissions(&executable, fs::Permissions::from_mode(0o700)).unwrap();
-        let mut client = Client::new().unwrap();
-        client.runner.path = Some(dir.path().as_os_str().to_owned());
-        Self {
-            runtime: Runtime {
-                cache: Cache {
-                    directory: dir.path().join("cache"),
-                },
-                client,
-            },
-            dir,
-        }
-    }
-
-    fn metadata(metadata: serde_json::Value) -> Self {
-        let json = metadata.to_string().replace('\'', "'\\''");
-        Self::new(&format!("printf '%s\\n' '{json}'"))
-    }
-}
+use youtube_captions_dl::{Cache, Captions, FetchError, Runtime};
 
 async fn run(
     args: &[&str],
@@ -466,46 +437,12 @@ while [ ! -f "$dir/grandchild.pid" ]; do sleep 0.01; done"#
     Fixture::new(&format!(
         r#"PATH=/usr/bin:/bin
 dir=$(dirname "$0")
-echo $$ > "$dir/leader.pid"
+echo $$ > "$dir/leader.tmp" && mv "$dir/leader.tmp" "$dir/leader.pid"
 trap 'echo stopping >&2; echo > "$dir/leader-term"; exit 143' TERM
 {grandchild}
 echo > "$dir/ready"
 while :; do sleep 0.05; done"#
     ))
-}
-
-/// Kills whatever remains of the stand-in's process group when a test ends,
-/// including on failure.
-struct GroupGuard(PathBuf);
-
-impl GroupGuard {
-    fn leader(&self) -> Option<rustix::process::Pid> {
-        fs::read_to_string(self.0.join("leader.pid"))
-            .ok()
-            .and_then(|pid| pid.trim().parse().ok())
-            .and_then(rustix::process::Pid::from_raw)
-    }
-
-    /// Waits until no member of the group remains, including unreaped ones.
-    fn wait_for_exit(&self) -> bool {
-        let leader = self.leader().expect("the stand-in recorded its pid");
-        let deadline = Instant::now() + Duration::from_secs(5);
-        while rustix::process::test_kill_process_group(leader).is_ok() {
-            if Instant::now() >= deadline {
-                return false;
-            }
-            std::thread::sleep(Duration::from_millis(10));
-        }
-        true
-    }
-}
-
-impl Drop for GroupGuard {
-    fn drop(&mut self) {
-        if let Some(leader) = self.leader() {
-            let _ = rustix::process::kill_process_group(leader, rustix::process::Signal::KILL);
-        }
-    }
 }
 
 async fn wait_for_file(path: &Path) {
@@ -526,7 +463,7 @@ async fn cancellation_and_deadline_terminate_yt_dlp_before_killing_its_group() {
     for timeout in [false, true] {
         let mut fixture = terminating_stand_in(true);
         let dir = fixture.dir.path().to_owned();
-        let group = GroupGuard(dir.clone());
+        let group = ProcessGroup(dir.clone());
         fixture.runtime.client.runner.termination_grace = grace;
         fixture.runtime.client.deadline = Duration::from_secs(if timeout { 2 } else { 30 });
         let token = CancellationToken::new();
@@ -572,7 +509,7 @@ fn interrupt_and_termination_signals_cancel_the_cli_and_stop_yt_dlp() {
     for signal in [rustix::process::Signal::INT, rustix::process::Signal::TERM] {
         let fixture = terminating_stand_in(false);
         let dir = fixture.dir.path().to_owned();
-        let group = GroupGuard(dir.clone());
+        let group = ProcessGroup(dir.clone());
         let child = std::process::Command::new(env!("CARGO_BIN_EXE_youtube-captions-dl"))
             .args(["caption", "get", "tG1CSRaJhKQ"])
             .env("AGENT", "1")
@@ -600,29 +537,87 @@ fn interrupt_and_termination_signals_cancel_the_cli_and_stop_yt_dlp() {
     }
 }
 
-/// Kills the CLI if a test fails before it exits.
-struct CliGuard(Option<std::process::Child>);
-
-impl CliGuard {
-    fn wait(mut self) -> std::process::Output {
-        let mut child = self.0.take().unwrap();
-        let deadline = Instant::now() + Duration::from_secs(10);
-        while child.try_wait().unwrap().is_none() {
-            if Instant::now() >= deadline {
-                self.0 = Some(child);
-                panic!("the CLI did not exit after the signal");
-            }
-            std::thread::sleep(Duration::from_millis(10));
+#[test]
+fn fixture_shutdown_stops_the_group_before_removing_scratch() {
+    for stubborn in [false, true] {
+        let fixture = terminating_stand_in(stubborn);
+        let dir = fixture.dir.path().to_owned();
+        let child = std::process::Command::new(dir.join("yt-dlp"))
+            .process_group(0)
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .unwrap();
+        let cli = CliGuard(Some(child));
+        tokio::runtime::Builder::new_current_thread()
+            .enable_time()
+            .build()
+            .unwrap()
+            .block_on(wait_for_file(&dir.join("ready")));
+        let leader = ProcessGroup(dir.clone()).leader().unwrap().unwrap();
+        let reaper = std::thread::spawn(move || cli.wait());
+        let started = Instant::now();
+        drop(fixture);
+        let output = reaper.join().unwrap();
+        assert_eq!(output.status.code(), Some(143), "the leader handled TERM");
+        if stubborn {
+            assert!(started.elapsed() >= Duration::from_millis(300));
         }
-        child.wait_with_output().unwrap()
+        assert_eq!(
+            rustix::process::test_kill_process_group(leader),
+            Err(rustix::io::Errno::SRCH),
+            "every process exited before scratch removal"
+        );
+        assert!(!dir.exists());
     }
 }
 
-impl Drop for CliGuard {
-    fn drop(&mut self) {
-        if let Some(mut child) = self.0.take() {
-            let _ = child.kill();
-            let _ = child.wait();
-        }
+#[test]
+fn failed_test_stops_the_cli_before_removing_its_scratch() {
+    let fixture = terminating_stand_in(false);
+    let dir = fixture.dir.path().to_owned();
+    let group = ProcessGroup(dir.clone());
+    let child = std::process::Command::new(env!("CARGO_BIN_EXE_youtube-captions-dl"))
+        .args(["caption", "get", "tG1CSRaJhKQ"])
+        .env("AGENT", "1")
+        .env("XDG_CACHE_HOME", dir.join("xdg"))
+        .env("PATH", &dir)
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .unwrap();
+    let cli = CliGuard(Some(child));
+    tokio::runtime::Builder::new_current_thread()
+        .enable_time()
+        .build()
+        .unwrap()
+        .block_on(wait_for_file(&dir.join("ready")));
+    let failed = std::panic::catch_unwind(move || {
+        let _cli = cli;
+        panic!("simulate a failed assertion while the CLI is running");
+    });
+    assert!(failed.is_err());
+    assert!(
+        dir.join("leader-term").exists(),
+        "shutdown allowed fixture cleanup"
+    );
+    assert!(
+        group.wait_for_exit(),
+        "shutdown confirmed every process exited"
+    );
+    drop(fixture);
+    assert!(!dir.exists(), "scratch was removed after shutdown");
+}
+
+#[test]
+fn uncertain_process_ownership_preserves_fixture_scratch() {
+    for invalid in ["not a process ID", "0", "-1"] {
+        let fixture = Fixture::new("exit 0");
+        let dir = fixture.dir.path().to_owned();
+        fs::write(dir.join("leader.pid"), invalid).unwrap();
+        let failed = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| drop(fixture)));
+        assert!(failed.is_err());
+        assert!(dir.join("yt-dlp").exists());
+        fs::remove_dir_all(dir).unwrap();
     }
 }
