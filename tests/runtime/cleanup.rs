@@ -132,7 +132,7 @@ fn unwinding_before_pid_publication_preserves_live_process_scratch() {
     let mut fixture = Fixture::new(
         r#"dir=${0%/*}
 trap 'while [ ! -f "$dir/allow-exit" ]; do /bin/sleep 0.01; done; exit 143' TERM
-echo $$ > "$dir/ready"
+echo $$ > "$dir/ready.tmp" && /bin/mv "$dir/ready.tmp" "$dir/ready"
 while :; do /bin/sleep 0.05; done"#,
     );
     fixture.runtime.client.runner.termination_grace = Duration::from_secs(5);
