@@ -1,6 +1,49 @@
 use super::*;
 
 #[test]
+fn group_exit_waits_for_the_zombie_to_be_reaped() {
+    let fixture = Fixture::new("dir=${0%/*}\necho $$ > \"$dir/leader.pid\"\nexit 0");
+    let dir = fixture.dir.path().to_owned();
+    let child = std::process::Command::new(dir.join("yt-dlp"))
+        .process_group(0)
+        .spawn()
+        .unwrap();
+    let mut cli = CliGuard(Some(child));
+    let leader = rustix::process::Pid::from_child(cli.0.as_ref().unwrap());
+    rustix::process::waitid(
+        rustix::process::WaitId::Pid(leader),
+        rustix::process::WaitIdOptions::EXITED | rustix::process::WaitIdOptions::NOWAIT,
+    )
+    .unwrap();
+    let probe = rustix::process::test_kill_process_group(leader);
+    let (result_tx, result_rx) = std::sync::mpsc::channel();
+    let observer = std::thread::spawn(move || {
+        result_tx.send(ProcessGroup(dir).wait_for_exit()).unwrap();
+    });
+    let premature = result_rx.recv_timeout(Duration::from_millis(100));
+    cli.0.as_mut().unwrap().wait().unwrap();
+    let waited_until_reaped = matches!(premature, Err(std::sync::mpsc::RecvTimeoutError::Timeout));
+    let result =
+        premature.unwrap_or_else(|_| result_rx.recv_timeout(Duration::from_secs(5)).unwrap());
+    observer.join().unwrap();
+    drop(cli);
+    drop(fixture);
+    #[cfg(target_os = "macos")]
+    assert_eq!(probe, Err(rustix::io::Errno::PERM));
+    #[cfg(not(target_os = "macos"))]
+    assert!(probe.is_ok());
+    assert!(
+        waited_until_reaped,
+        "an unreaped group is not an error or a completed shutdown"
+    );
+    result.unwrap();
+    assert_eq!(
+        rustix::process::test_kill_process_group(leader),
+        Err(rustix::io::Errno::SRCH)
+    );
+}
+
+#[test]
 fn fixture_shutdown_stops_the_group_before_removing_scratch() {
     for stubborn in [false, true] {
         let fixture = terminating_stand_in(stubborn);
@@ -64,10 +107,9 @@ fn failed_test_stops_the_cli_before_removing_its_scratch() {
         dir.join("leader-term").exists(),
         "shutdown allowed fixture cleanup"
     );
-    assert!(
-        group.wait_for_exit(),
-        "shutdown confirmed every process exited"
-    );
+    group
+        .wait_for_exit()
+        .expect("shutdown confirmed every process exited");
     drop(fixture);
     assert!(!dir.exists(), "scratch was removed after shutdown");
 }

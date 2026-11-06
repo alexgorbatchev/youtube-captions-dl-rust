@@ -495,7 +495,7 @@ async fn cancellation_and_deadline_terminate_yt_dlp_before_killing_its_group() {
             returned - signalled >= grace,
             "the group kept its grace period before SIGKILL"
         );
-        assert!(group.wait_for_exit(), "SIGKILL ended the group");
+        group.wait_for_exit().expect("SIGKILL ended the group");
     }
 }
 
@@ -527,7 +527,7 @@ fn interrupt_and_termination_signals_cancel_the_cli_and_stop_yt_dlp() {
         assert!(output.stdout.is_empty());
         assert_eq!(output.stderr, b"ERR: operation cancelled\n");
         assert!(dir.join("leader-term").exists(), "yt-dlp received SIGTERM");
-        assert!(group.wait_for_exit());
+        group.wait_for_exit().unwrap();
         assert!(!dir.join("xdg").exists(), "a cancelled run writes no cache");
     }
 }

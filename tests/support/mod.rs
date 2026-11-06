@@ -78,7 +78,7 @@ impl ProcessGroup {
     }
 
     /// Waits until no member of the group remains, including unreaped ones.
-    pub(super) fn wait_for_exit(&self) -> bool {
+    pub(super) fn wait_for_exit(&self) -> io::Result<()> {
         let leader = self
             .leader()
             .unwrap()
@@ -86,49 +86,74 @@ impl ProcessGroup {
         Self::wait_for(leader, Duration::from_secs(5))
     }
 
-    fn wait_for(leader: rustix::process::Pid, timeout: Duration) -> bool {
+    fn wait_for(leader: rustix::process::Pid, timeout: Duration) -> io::Result<()> {
         let deadline = Instant::now() + timeout;
         loop {
             match rustix::process::test_kill_process_group(leader) {
-                Err(rustix::io::Errno::SRCH) => return true,
-                Err(_) => return false,
-                Ok(()) if Instant::now() >= deadline => return false,
-                Ok(()) => std::thread::sleep(Duration::from_millis(10)),
+                Err(rustix::io::Errno::SRCH) => return Ok(()),
+                // macOS can report EPERM while only unreaped zombies remain.
+                // It is not proof of exit: continue until ESRCH or the deadline.
+                Err(rustix::io::Errno::PERM) if Instant::now() < deadline => {}
+                Err(error) => return Err(error.into()),
+                Ok(()) if Instant::now() >= deadline => {
+                    return Err(io::Error::new(
+                        io::ErrorKind::TimedOut,
+                        format!("process group {leader:?} still exists"),
+                    ));
+                }
+                Ok(()) => {}
             }
+            std::thread::sleep(Duration::from_millis(10));
         }
     }
 
-    fn stop(&self, unfinished: usize) -> bool {
-        let leader = match self.leader() {
-            Ok(Some(leader)) => leader,
-            Ok(None) => return unfinished == 0,
-            Err(_) => return false,
+    fn stop(&self, unfinished: usize) -> io::Result<()> {
+        let leader = match self.leader()? {
+            Some(leader) => leader,
+            None if unfinished == 0 => return Ok(()),
+            None => {
+                return Err(io::Error::other(
+                    "unfinished operation without a process ID",
+                ));
+            }
         };
         for (signal, grace) in [
             (rustix::process::Signal::TERM, Duration::from_millis(300)),
             (rustix::process::Signal::KILL, Duration::from_secs(5)),
         ] {
             match rustix::process::kill_process_group(leader, signal) {
-                Err(rustix::io::Errno::SRCH) => return true,
-                Err(_) => return false,
-                Ok(()) => {}
+                Err(rustix::io::Errno::SRCH) => return Ok(()),
+                Ok(()) | Err(rustix::io::Errno::PERM) => {}
+                Err(error) => return Err(error.into()),
             }
-            if Self::wait_for(leader, grace) {
-                return true;
+            match Self::wait_for(leader, grace) {
+                Ok(()) => return Ok(()),
+                Err(error)
+                    if signal == rustix::process::Signal::TERM
+                        && error.kind() == io::ErrorKind::TimedOut => {}
+                Err(error) => return Err(error),
             }
         }
-        false
+        unreachable!("the final wait either confirms exit or reports its error")
     }
 }
 
 impl Drop for Fixture {
     fn drop(&mut self) {
-        let stopped = ProcessGroup(self.dir.path().to_owned()).stop(self.unfinished.get());
-        if !stopped || self.unfinished.get() != 0 {
+        let stopped = ProcessGroup(self.dir.path().to_owned())
+            .stop(self.unfinished.get())
+            .and_then(|()| {
+                if self.unfinished.get() == 0 {
+                    Ok(())
+                } else {
+                    Err(io::Error::other("an asynchronous operation did not finish"))
+                }
+            });
+        if let Err(error) = stopped {
             self.dir.disable_cleanup(true);
             let message = format!(
-                "cannot confirm fixture shutdown; preserving {}",
-                self.dir.path().display()
+                "cannot confirm fixture shutdown; preserving {}: {error}",
+                self.dir.path().display(),
             );
             if std::thread::panicking() {
                 eprintln!("{message}");
